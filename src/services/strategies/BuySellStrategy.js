@@ -1,0 +1,287 @@
+import { addLog, tradeLog } from '../../utils/logger'
+import { getXOCPrice, buyXOC, sellXOC } from '../swap'
+
+/**
+ * 低买高卖策略
+ * 当价格低于买入阈值时买入，高于卖出阈值时卖出
+ * 持续交易直到价格不满足条件
+ */
+export class BuySellStrategy {
+  constructor(config, wallet, swapService) {
+    this.config = config // { buyThreshold, sellThreshold, tradeAmount, checkInterval }
+    this.wallet = wallet
+    this.swapService = swapService
+    this.isRunning = false
+    this.timer = null
+    this.startTime = null // 记录启动时间
+    this.lastTradeTime = null // 记录最后交易时间
+    this.lastPrice = null // 记录最后检查的价格
+    this.stats = {
+      totalBuyCount: 0,
+      totalSellCount: 0,
+      totalBuyAmount: 0,
+      totalSellAmount: 0,
+      totalXOCBought: 0,
+      totalXOCSold: 0,
+      failedTrades: 0 // 失败交易次数
+    }
+  }
+
+  /**
+   * 启动策略
+   */
+  async start() {
+    try {
+      if (this.isRunning) {
+        throw new Error('策略已在运行中')
+      }
+
+      this.isRunning = true
+      this.startTime = Date.now() // 记录启动时间
+      
+      tradeLog.success(
+        '🤖 低买高卖策略启动\n' +
+        `📊 买入阈值: ${this.config.buyThreshold} USDT\n` +
+        `📊 卖出阈值: ${this.config.sellThreshold} USDT\n` +
+        `💰 交易金额: ${this.config.tradeAmount} USDT\n` +
+        `⏱️  检查间隔: ${this.config.checkInterval}秒\n` +
+        `🚀 开始时间: ${new Date().toLocaleString('zh-CN')}`
+      )
+
+      // 设置定时器 - 持续监控价格并交易
+      this.timer = setInterval(async () => {
+        await this.checkAndTrade()
+      }, this.config.checkInterval * 1000)
+
+      // 立即执行第一次检查（在定时器之后，确保即使失败也不影响定时器）
+      await this.checkAndTrade()
+      
+      tradeLog.info('✅ 策略定时器已启动，开始持续监控...')
+    } catch (error) {
+      this.isRunning = false
+      if (this.timer) {
+        clearInterval(this.timer)
+        this.timer = null
+      }
+      tradeLog.error(`❌ 启动策略失败: ${error.message}`)
+      throw error // 重新抛出，让 BotManager 知道启动失败
+    }
+  }
+
+  /**
+   * 停止策略
+   */
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+    this.isRunning = false
+    
+    const runningTime = this.getRunningTime()
+    const netProfit = this.stats.totalSellAmount - this.stats.totalBuyAmount
+    
+    tradeLog.info(
+      '⛔ 低买高卖策略停止\n' +
+      `⏱️  运行时长: ${this.formatTime(runningTime)}\n` +
+      `📈 买入次数: ${this.stats.totalBuyCount} (${this.stats.totalBuyAmount.toFixed(2)} USDT)\n` +
+      `📉 卖出次数: ${this.stats.totalSellCount} (${this.stats.totalSellAmount.toFixed(2)} USDT)\n` +
+      `❌ 失败次数: ${this.stats.failedTrades}\n` +
+      `💵 净盈亏: ${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} USDT\n` +
+      `🏁 结束时间: ${new Date().toLocaleString('zh-CN')}`
+    )
+  }
+
+  /**
+   * 检查价格并执行交易 - 持续交易直到价格不满足条件
+   */
+  async checkAndTrade() {
+    if (!this.isRunning) {
+      tradeLog.warning('⚠️ 策略未运行，跳过检查')
+      return
+    }
+
+    try {
+      // 获取当前价格
+      const provider = this.wallet.provider
+      
+      // 获取 XOC/USDT 价格
+      const price = await getXOCPrice(provider)
+      this.lastPrice = price
+
+      // 判断交易信号并持续执行
+      if (price <= this.config.buyThreshold) {
+        // 价格低于或等于买入阈值，执行买入
+        const discount = ((1 - price / this.config.buyThreshold) * 100).toFixed(2)
+        tradeLog.warning(
+          '🔔 触发买入信号!\n' +
+          `💹 当前价格: ${price.toFixed(6)} USDT\n` +
+          `🎯 买入阈值: ${this.config.buyThreshold} USDT\n` +
+          `💰 折扣率: ${discount}%\n` +
+          `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+        )
+        await this.executeBuy(price)
+        
+      } else if (price >= this.config.sellThreshold) {
+        // 价格高于或等于卖出阈值，执行卖出
+        const premium = ((price / this.config.sellThreshold - 1) * 100).toFixed(2)
+        tradeLog.warning(
+          '🔔 触发卖出信号!\n' +
+          `💹 当前价格: ${price.toFixed(6)} USDT\n` +
+          `🎯 卖出阈值: ${this.config.sellThreshold} USDT\n` +
+          `📈 溢价率: ${premium}%\n` +
+          `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+        )
+        await this.executeSell(price)
+        
+      } else {
+        // 价格在阈值之间，等待交易信号
+        // 每10次检查输出一次状态，避免日志过多
+        const totalChecks = this.stats.totalBuyCount + this.stats.totalSellCount
+        if (totalChecks % 10 === 0) {
+          tradeLog.info(
+            `⏳ 监控中... 价格: ${price.toFixed(6)} USDT | ` +
+            `买入阈值: ${this.config.buyThreshold} | ` +
+            `卖出阈值: ${this.config.sellThreshold} | ` +
+            `运行: ${this.formatTime(this.getRunningTime())}`
+          )
+        }
+      }
+    } catch (error) {
+      this.stats.failedTrades++
+      tradeLog.error(`❌ 检查价格失败: ${error.message}`)
+      // 不停止策略，继续运行
+    }
+  }
+
+  /**
+   * 执行买入
+   */
+  async executeBuy(price) {
+    try {
+      tradeLog.info(`🔄 开始执行买入操作: ${this.config.tradeAmount} USDT`)
+
+      const expectedXOC = this.config.tradeAmount / price
+
+      const result = await buyXOC(
+        this.wallet,
+        this.config.tradeAmount,
+        0.5 // 0.5% 滑点
+      )
+
+      this.stats.totalBuyCount++
+      this.stats.totalBuyAmount += this.config.tradeAmount
+      this.stats.totalXOCBought += expectedXOC
+      this.lastTradeTime = Date.now()
+
+      const avgBuyPrice = this.stats.totalBuyAmount / this.stats.totalXOCBought
+
+      tradeLog.success(
+        '✅ 买入成功!\n' +
+        `💰 花费: ${this.config.tradeAmount} USDT\n` +
+        `🪙 获得: ${expectedXOC.toFixed(6)} XOC\n` +
+        `📊 交易价格: ${price.toFixed(6)} USDT\n` +
+        `📈 平均买入价: ${avgBuyPrice.toFixed(6)} USDT\n` +
+        `🔗 交易哈希: ${result.hash}\n` +
+        `📊 累计买入: ${this.stats.totalBuyCount}次 | ${this.stats.totalBuyAmount.toFixed(2)} USDT\n` +
+        `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+      )
+
+      return result
+    } catch (error) {
+      this.stats.failedTrades++
+      tradeLog.error(`❌ 买入失败: ${error.message}`)
+      // 不抛出错误，让策略继续运行
+      return null
+    }
+  }
+
+  /**
+   * 执行卖出
+   */
+  async executeSell(price) {
+    try {
+      const xocToSell = this.config.tradeAmount / price
+      tradeLog.info(`🔄 开始执行卖出操作: ${xocToSell.toFixed(6)} XOC`)
+
+      const expectedUSDT = xocToSell * price
+
+      const result = await sellXOC(
+        this.wallet,
+        xocToSell,
+        0.5 // 0.5% 滑点
+      )
+
+      this.stats.totalSellCount++
+      this.stats.totalSellAmount += expectedUSDT
+      this.stats.totalXOCSold += xocToSell
+      this.lastTradeTime = Date.now()
+
+      const avgSellPrice = this.stats.totalSellAmount / this.stats.totalXOCSold
+      const netProfit = this.stats.totalSellAmount - this.stats.totalBuyAmount
+
+      tradeLog.success(
+        '✅ 卖出成功!\n' +
+        `🪙 卖出: ${xocToSell.toFixed(6)} XOC\n` +
+        `💰 获得: ${expectedUSDT.toFixed(2)} USDT\n` +
+        `📊 交易价格: ${price.toFixed(6)} USDT\n` +
+        `📉 平均卖出价: ${avgSellPrice.toFixed(6)} USDT\n` +
+        `🔗 交易哈希: ${result.hash}\n` +
+        `📊 累计卖出: ${this.stats.totalSellCount}次 | ${this.stats.totalSellAmount.toFixed(2)} USDT\n` +
+        `💵 净盈亏: ${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} USDT\n` +
+        `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+      )
+
+      return result
+    } catch (error) {
+      this.stats.failedTrades++
+      tradeLog.error(`❌ 卖出失败: ${error.message}`)
+      // 不抛出错误，让策略继续运行
+      return null
+    }
+  }
+
+  /**
+   * 获取运行时长（秒）
+   */
+  getRunningTime() {
+    if (!this.startTime) return 0
+    return Math.floor((Date.now() - this.startTime) / 1000)
+  }
+
+  /**
+   * 格式化时间显示
+   */
+  formatTime(seconds) {
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    const s = seconds % 60
+    return `${h}小时 ${m}分钟 ${s}秒`
+  }
+
+  /**
+   * 获取统计信息
+   */
+  getStats() {
+    const netXOC = this.stats.totalXOCBought - this.stats.totalXOCSold
+    const netUSDT = this.stats.totalSellAmount - this.stats.totalBuyAmount
+    const avgBuyPrice = this.stats.totalXOCBought > 0 ? this.stats.totalBuyAmount / this.stats.totalXOCBought : 0
+    const avgSellPrice = this.stats.totalXOCSold > 0 ? this.stats.totalSellAmount / this.stats.totalXOCSold : 0
+    const totalTrades = this.stats.totalBuyCount + this.stats.totalSellCount
+    const successRate = totalTrades > 0 ? ((totalTrades - this.stats.failedTrades) / totalTrades * 100).toFixed(2) : 0
+    
+    return {
+      ...this.stats,
+      netXOC,
+      netUSDT,
+      profit: netUSDT,
+      avgBuyPrice,
+      avgSellPrice,
+      totalTrades,
+      successRate,
+      runningTime: this.getRunningTime(),
+      lastPrice: this.lastPrice,
+      lastTradeTime: this.lastTradeTime
+    }
+  }
+}
