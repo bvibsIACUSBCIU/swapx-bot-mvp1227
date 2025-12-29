@@ -1,5 +1,6 @@
 import { addLog, tradeLog } from '../../utils/logger'
 import { getXOCPrice, buyXOC, sellXOC } from '../swap'
+import { saveTrade } from '../../utils/storage'
 
 /**
  * 低买高卖策略
@@ -28,50 +29,51 @@ export class BuySellStrategy {
   }
 
   /**
-   * 启动策略
+   * 启动策略（同步返回，不阻塞）
    */
-  async start() {
-    try {
-      if (this.isRunning) {
-        throw new Error('策略已在运行中')
-      }
-
-      this.isRunning = true
-      this.startTime = Date.now() // 记录启动时间
-      
-      tradeLog.success(
-        '🤖 低买高卖策略启动\n' +
-        `📊 买入阈值: ${this.config.buyThreshold} USDT\n` +
-        `📊 卖出阈值: ${this.config.sellThreshold} USDT\n` +
-        `💰 交易金额: ${this.config.tradeAmount} USDT\n` +
-        `⏱️  检查间隔: ${this.config.checkInterval}秒\n` +
-        `🚀 开始时间: ${new Date().toLocaleString('zh-CN')}`
-      )
-
-      // 设置定时器 - 持续监控价格并交易
-      this.timer = setInterval(async () => {
-        await this.checkAndTrade()
-      }, this.config.checkInterval * 1000)
-
-      // 立即执行第一次检查（在定时器之后，确保即使失败也不影响定时器）
-      await this.checkAndTrade()
-      
-      tradeLog.info('✅ 策略定时器已启动，开始持续监控...')
-    } catch (error) {
-      this.isRunning = false
-      if (this.timer) {
-        clearInterval(this.timer)
-        this.timer = null
-      }
-      tradeLog.error(`❌ 启动策略失败: ${error.message}`)
-      throw error // 重新抛出，让 BotManager 知道启动失败
+  start() {
+    if (this.isRunning) {
+      tradeLog.warning('策略已在运行中')
+      return
     }
+
+    this.isRunning = true
+    this.startTime = Date.now() // 记录启动时间
+    
+    tradeLog.success(
+      '🤖 低买高卖策略启动\n' +
+      `📊 买入阈值: ${this.config.buyThreshold} USDT\n` +
+      `📊 卖出阈值: ${this.config.sellThreshold} USDT\n` +
+      `💰 交易金额: ${this.config.tradeAmount} USDT\n` +
+      `⏱️  检查间隔: ${this.config.checkInterval}秒\n` +
+      `🚀 开始时间: ${new Date().toLocaleString('zh-CN')}`
+    )
+
+    // 设置定时器 - 持续监控价格并交易
+    this.timer = setInterval(async () => {
+      try {
+        await this.checkAndTrade()
+      } catch (error) {
+        // 捕获任何未处理的错误，防止定时器停止
+        tradeLog.error(`定时检查出错: ${error.message}`)
+        this.stats.failedTrades++
+      }
+    }, this.config.checkInterval * 1000)
+
+    // 立即执行第一次检查（完全异步，不阻塞启动）
+    this.checkAndTrade().catch(error => {
+      tradeLog.error(`首次检查失败: ${error.message}`)
+      this.stats.failedTrades++
+    })
+    
+    tradeLog.info('✅ 策略定时器已启动，开始持续监控...')
   }
 
   /**
    * 停止策略
+   * @param {string} reason - 停止原因
    */
-  stop() {
+  stop(reason = '用户手动停止') {
     if (this.timer) {
       clearInterval(this.timer)
       this.timer = null
@@ -83,6 +85,7 @@ export class BuySellStrategy {
     
     tradeLog.info(
       '⛔ 低买高卖策略停止\n' +
+      `📝 停止原因: ${reason}\n` +
       `⏱️  运行时长: ${this.formatTime(runningTime)}\n` +
       `📈 买入次数: ${this.stats.totalBuyCount} (${this.stats.totalBuyAmount.toFixed(2)} USDT)\n` +
       `📉 卖出次数: ${this.stats.totalSellCount} (${this.stats.totalSellAmount.toFixed(2)} USDT)\n` +
@@ -169,12 +172,28 @@ export class BuySellStrategy {
         0.5 // 0.5% 滑点
       )
 
+      // 交易成功后的处理
+
       this.stats.totalBuyCount++
       this.stats.totalBuyAmount += this.config.tradeAmount
       this.stats.totalXOCBought += expectedXOC
       this.lastTradeTime = Date.now()
 
       const avgBuyPrice = this.stats.totalBuyAmount / this.stats.totalXOCBought
+
+      // 保存交易记录
+      saveTrade({
+        type: 'BUY',
+        tokenFrom: 'USDT',
+        tokenTo: 'XOC',
+        amountIn: this.config.tradeAmount,
+        amountOut: expectedXOC,
+        price: price,
+        txHash: result.hash,
+        status: 'success',
+        source: 'bot',
+        botType: 'buysell'
+      })
 
       tradeLog.success(
         '✅ 买入成功!\n' +
@@ -190,7 +209,26 @@ export class BuySellStrategy {
       return result
     } catch (error) {
       this.stats.failedTrades++
-      tradeLog.error(`❌ 买入失败: ${error.message}`)
+      
+      // 检测是否是资金不足
+      if (error.message && (error.message.includes('insufficient funds') || 
+          error.message.includes('余额不足') ||
+          error.message.includes('balance') ||
+          error.message.includes('INSUFFICIENT'))) {
+        tradeLog.warning(
+          '⚠️ 买入失败：资金不足\n' +
+          `💰 需要: ${this.config.tradeAmount} USDT\n` +
+          `📝 请及时充值，机器人将继续监控价格\n` +
+          `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+        )
+      } else {
+        tradeLog.error(
+          `❌ 买入失败: ${error.message}\n` +
+          `📊 失败次数: ${this.stats.failedTrades}\n` +
+          `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+        )
+      }
+      
       // 不抛出错误，让策略继续运行
       return null
     }
@@ -220,6 +258,20 @@ export class BuySellStrategy {
       const avgSellPrice = this.stats.totalSellAmount / this.stats.totalXOCSold
       const netProfit = this.stats.totalSellAmount - this.stats.totalBuyAmount
 
+      // 保存交易记录
+      saveTrade({
+        type: 'SELL',
+        tokenFrom: 'XOC',
+        tokenTo: 'USDT',
+        amountIn: xocToSell,
+        amountOut: expectedUSDT,
+        price: price,
+        txHash: result.hash,
+        status: 'success',
+        source: 'bot',
+        botType: 'buysell'
+      })
+
       tradeLog.success(
         '✅ 卖出成功!\n' +
         `🪙 卖出: ${xocToSell.toFixed(6)} XOC\n` +
@@ -235,7 +287,26 @@ export class BuySellStrategy {
       return result
     } catch (error) {
       this.stats.failedTrades++
-      tradeLog.error(`❌ 卖出失败: ${error.message}`)
+      
+      // 检测是否是余额不足
+      if (error.message && (error.message.includes('insufficient funds') || 
+          error.message.includes('余额不足') ||
+          error.message.includes('balance') ||
+          error.message.includes('INSUFFICIENT'))) {
+        tradeLog.warning(
+          '⚠️ 卖出失败：XOC余额不足\n' +
+          `🪙 需要: ${(this.config.tradeAmount / this.lastPrice).toFixed(6)} XOC\n` +
+          `📝 请检查余额，机器人将继续监控价格\n` +
+          `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+        )
+      } else {
+        tradeLog.error(
+          `❌ 卖出失败: ${error.message}\n` +
+          `📊 失败次数: ${this.stats.failedTrades}\n` +
+          `⏱️  运行时长: ${this.formatTime(this.getRunningTime())}`
+        )
+      }
+      
       // 不抛出错误，让策略继续运行
       return null
     }

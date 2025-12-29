@@ -1,15 +1,18 @@
-import { Card, Row, Col, Statistic, Alert, Button, Space } from 'antd'
+import { Card, Row, Col, Statistic, Alert, Button, Space, Modal, message } from 'antd'
 import { 
   WalletOutlined, 
   DollarOutlined, 
   SwapOutlined,
   RiseOutlined,
   FallOutlined,
-  ReloadOutlined 
+  ReloadOutlined,
+  DeleteOutlined 
 } from '@ant-design/icons'
 import { useState, useEffect } from 'react'
 import WalletImport from './WalletImport'
 import WalletBalance from './WalletBalance'
+import TradeHistory from './TradeHistory'
+import { clearAllStorage } from '../utils/storage'
 
 /**
  * Dashboard - 钱包概览页面
@@ -40,11 +43,12 @@ export default function Dashboard({ wallet, onWalletImported }) {
         new Date(t.timestamp).toDateString() === today
       ).length
       
-      // 计算总盈亏
-      const totalProfit = trades.reduce((sum, t) => {
-        if (t.type === 'BUY') return sum - t.amountUSDT
-        return sum + t.amountUSDT
-      }, 0)
+      // 计算总盈亏 - 修正计算逻辑
+      const buyTrades = trades.filter(t => t.type === 'BUY')
+      const sellTrades = trades.filter(t => t.type === 'SELL')
+      const buyUSDT = buyTrades.reduce((sum, t) => sum + (t.amountIn || 0), 0)
+      const sellUSDT = sellTrades.reduce((sum, t) => sum + (t.amountOut || 0), 0)
+      const totalProfit = sellUSDT - buyUSDT
       
       // 计算成功率
       const successTrades = trades.filter(t => t.status === 'success').length
@@ -65,6 +69,44 @@ export default function Dashboard({ wallet, onWalletImported }) {
     } catch (error) {
       console.error('加载统计数据失败:', error)
     }
+  }
+
+  const handleClearAllData = () => {
+    Modal.confirm({
+      title: '确认清除所有数据',
+      content: (
+        <div>
+          <p>此操作将清除以下所有数据：</p>
+          <ul>
+            <li>钱包信息</li>
+            <li>机器人配置</li>
+            <li>交易记录</li>
+            <li>日志记录</li>
+            <li>应用配置</li>
+          </ul>
+          <p style={{ color: 'red', fontWeight: 'bold' }}>
+            此操作不可恢复，请确认！
+          </p>
+        </div>
+      ),
+      okText: '确定清除',
+      cancelText: '取消',
+      okType: 'danger',
+      width: 500,
+      onOk: () => {
+        try {
+          clearAllStorage()
+          message.success('所有数据已清除')
+          // 刷新页面
+          setTimeout(() => {
+            window.location.reload()
+          }, 1000)
+        } catch (error) {
+          message.error('清除数据失败')
+          console.error(error)
+        }
+      }
+    })
   }
 
   return (
@@ -179,8 +221,18 @@ export default function Dashboard({ wallet, onWalletImported }) {
               <Button href="#/logs">
                 查看日志
               </Button>
+              <Button 
+                danger
+                icon={<DeleteOutlined />}
+                onClick={handleClearAllData}
+              >
+                清除所有数据
+              </Button>
             </Space>
           </Card>
+
+          {/* 交易记录 */}
+          <TradeHistory />
         </>
       )}
     </div>

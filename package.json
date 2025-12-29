@@ -17,6 +17,8 @@
     "ethers": "^6.9.0",
     "@uniswap/sdk-core": "^4.2.0",
     "@uniswap/v2-sdk": "^3.3.0",
+    "@swapx-lib/sdk-core": "latest",
+    "@swapx-lib/v2-sdk": "latest",
     "@ant-design/icons": "^5.2.6",
     "dayjs": "^1.11.10"
   },

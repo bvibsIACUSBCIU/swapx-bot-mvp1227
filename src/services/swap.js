@@ -1,6 +1,6 @@
 import { ethers } from 'ethers'
-import { Token, CurrencyAmount, TradeType, Percent } from '@uniswap/sdk-core'
-import { Pair, Route, Trade } from '@uniswap/v2-sdk'
+import { Token, CurrencyAmount, TradeType, Percent } from '@swapx-lib/sdk-core'
+import { Pair, Route, Trade } from '@swapx-lib/v2-sdk'
 import { checkAllowance, approveToken, estimateGas } from './wallet'
 import { log, tradeLog } from '../utils/logger'
 

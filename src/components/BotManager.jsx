@@ -8,6 +8,7 @@ import { BuySellStrategy } from '../services/strategies/BuySellStrategy'
 import { DCAStrategy } from '../services/strategies/DCAStrategy'
 import { GridStrategy } from '../services/strategies/GridStrategy'
 import { ethers } from 'ethers'
+import botRunner from '../services/BotRunner'
 
 /**
  * BotManager - 策略机器人管理页面
@@ -19,9 +20,9 @@ export default function BotManager({ wallet }) {
   const [newBotType, setNewBotType] = useState('buysell')
   const [newBotName, setNewBotName] = useState('')
   
-  // 使用ref保存策略实例和定时器，防止重复创建
-  const strategyInstancesRef = useRef(new Map())
-  const statsTimersRef = useRef(new Map())
+  // 使用ref保存最新的bots状态
+  const botsRef = useRef(bots)
+  const healthCheckTimerRef = useRef(null)
 
   // 加载机器人列表
   useEffect(() => {
@@ -35,24 +36,39 @@ export default function BotManager({ wallet }) {
     }
   }, [bots])
 
-  // 组件卸载时清理所有定时器和策略实例
+  // 同步bots到ref
   useEffect(() => {
-    return () => {
-      // 停止所有运行中的策略
-      strategyInstancesRef.current.forEach((strategy) => {
-        if (strategy && strategy.stop) {
-          strategy.stop()
-        }
-      })
-      strategyInstancesRef.current.clear()
+    botsRef.current = bots
+  }, [bots])
 
-      // 清理所有统计定时器
-      statsTimersRef.current.forEach((timer) => {
-        if (timer) {
-          clearInterval(timer)
+  // 健壮性监控 - 定期检查机器人状态
+  useEffect(() => {
+    // 每10秒检查一次机器人状态
+    healthCheckTimerRef.current = setInterval(() => {
+      const currentBots = botsRef.current
+      currentBots.forEach(bot => {
+        if (bot.isRunning) {
+          // 检查策略是否真的在运行
+          if (!botRunner.isStrategyRunning(bot.id)) {
+            log.warning('检测到机器人异常', { 
+              id: bot.id, 
+              name: bot.name,
+              reason: '策略已停止但UI显示运行中'
+            })
+            // 同步状态
+            setBots(prevBots => prevBots.map(b => 
+              b.id === bot.id ? { ...b, isRunning: false } : b
+            ))
+          }
         }
       })
-      statsTimersRef.current.clear()
+    }, 10000)
+
+    return () => {
+      if (healthCheckTimerRef.current) {
+        clearInterval(healthCheckTimerRef.current)
+      }
+      // 不清理策略实例，让机器人继续运行
     }
   }, [])
 
@@ -107,15 +123,7 @@ export default function BotManager({ wallet }) {
         // 如果机器人正在运行，先停止它
         const bot = bots.find(b => b.id === id)
         if (bot && bot.isRunning) {
-          stopBot(bot)
-        }
-        
-        // 清理策略实例和定时器
-        strategyInstancesRef.current.delete(id)
-        const timer = statsTimersRef.current.get(id)
-        if (timer) {
-          clearInterval(timer)
-          statsTimersRef.current.delete(id)
+          stopBot(bot, '机器人被删除')
         }
         
         setBots(bots.filter(bot => bot.id !== id))
@@ -125,7 +133,7 @@ export default function BotManager({ wallet }) {
   }
 
   // 切换机器人状态
-  const handleToggleBot = async (id) => {
+  const handleToggleBot = (id) => {
     const bot = bots.find(b => b.id === id)
     if (!bot) return
 
@@ -136,8 +144,8 @@ export default function BotManager({ wallet }) {
       setBots(prevBots => prevBots.map(b => 
         b.id === id ? { ...b, isRunning: true } : b
       ))
-      // 启动机器人
-      await startBot(bot)
+      // 启动机器人（不await，异步执行）
+      startBot(bot)
     } else {
       // 停止机器人
       stopBot(bot)
@@ -149,7 +157,7 @@ export default function BotManager({ wallet }) {
   }
 
   // 启动机器人
-  const startBot = async (bot) => {
+  const startBot = (bot) => {
     try {
       log.info('启动机器人', bot)
       
@@ -183,14 +191,14 @@ export default function BotManager({ wallet }) {
           return
       }
 
-      // 保存策略实例
-      strategyInstancesRef.current.set(bot.id, strategy)
-
-      // 启动策略
-      await strategy.start()
+      // 注册策略到全局BotRunner
+      botRunner.registerStrategy(bot.id, strategy)
 
       // 记录启动时间
       const startTime = Date.now()
+
+      // 启动策略（同步返回，不阻塞）
+      botRunner.startStrategy(bot.id)
       
       // 启动运行时长统计定时器
       const timer = setInterval(() => {
@@ -215,16 +223,16 @@ export default function BotManager({ wallet }) {
           }
           return b
         }))
-      }, 1000) // 每秒更新一次
+      }, 1000)
 
-      statsTimersRef.current.set(bot.id, timer)
+      botRunner.registerTimer(bot.id, timer)
 
       log.success('机器人启动成功', { id: bot.id, type: bot.type })
     } catch (error) {
       log.error('启动机器人失败', error.message)
       
       // 清理可能已经创建的策略实例
-      strategyInstancesRef.current.delete(bot.id)
+      botRunner.stopStrategy(bot.id, '启动失败')
       
       // 出错时更新状态为停止，但不调用 stop()（因为可能根本没启动成功）
       setBots(prevBots => prevBots.map(b => 
@@ -234,25 +242,12 @@ export default function BotManager({ wallet }) {
   }
 
   // 停止机器人
-  const stopBot = (bot) => {
+  const stopBot = (bot, reason = '用户手动停止') => {
     try {
-      log.info('停止机器人', bot)
+      log.info('停止机器人', { bot, reason })
       
-      // 获取策略实例并停止
-      const strategy = strategyInstancesRef.current.get(bot.id)
-      if (strategy && strategy.stop) {
-        strategy.stop()
-      }
-      
-      // 清理策略实例
-      strategyInstancesRef.current.delete(bot.id)
-      
-      // 清理运行时长定时器
-      const timer = statsTimersRef.current.get(bot.id)
-      if (timer) {
-        clearInterval(timer)
-        statsTimersRef.current.delete(bot.id)
-      }
+      // 使用BotRunner停止策略
+      botRunner.stopStrategy(bot.id, reason)
 
       log.success('机器人已停止', { id: bot.id })
     } catch (error) {
