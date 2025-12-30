@@ -265,15 +265,17 @@ export default function BotManager({ wallet }) {
         checkInterval: 30
       },
       dca: {
-        amount: 10,
-        interval: 60,
-        totalTimes: 10
+        amount: 0.1,          // 单次定投金额
+        interval: 3600,      // 定投周期（秒），默认1小时
+        totalBudget: 100,    // 总预算上限
+        maxPrice: null       // 价格保护（可选）
       },
       grid: {
-        gridCount: 5,
-        lowerPrice: 0.08,
-        upperPrice: 0.12,
-        amountPerGrid: 10
+        totalInvestment: 100, // 总投入资金
+        gridCount: 5,         // 网格数量
+        lowerPrice: 0.08,     // 价格下限
+        upperPrice: 0.12,     // 价格上限
+        gridType: 'arithmetic' // 网格类型：等差
       }
     }
     return configs[type] || {}

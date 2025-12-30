@@ -200,7 +200,7 @@ export default function TradeHistory() {
       ellipsis: true,
       render: (hash) => (
         <a 
-          href={`https://explorer.xone.org/tx/${hash}`}
+          href={`https://www.xonescan.com/tx/${hash}`}
           target="_blank"
           rel="noopener noreferrer"
           style={{ fontFamily: 'monospace', fontSize: '12px' }}

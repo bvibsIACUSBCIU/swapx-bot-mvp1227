@@ -95,39 +95,54 @@ export default function BotCard({ bot, onUpdate, onDelete, onToggle }) {
       case 'dca':
         return (
           <Space direction="vertical" style={{ width: '100%' }}>
-            <Form.Item label="买入金额 (USDT)">
+            <Form.Item label="单次定投金额 (USDT)">
               <InputNumber
                 value={config.amount}
                 onChange={(v) => setConfig({ ...config, amount: v })}
-                min={1}
+                min={0.1}
                 max={10000}
                 style={{ width: '100%' }}
                 disabled={!isEditing || bot.isRunning}
+                placeholder="每次买入金额"
               />
             </Form.Item>
             
-            <Form.Item label="执行间隔">
+            <Form.Item label="定投周期">
               <Select
                 value={config.interval}
                 onChange={(v) => setConfig({ ...config, interval: v })}
                 disabled={!isEditing || bot.isRunning}
                 style={{ width: '100%' }}
               >
-                <Select.Option value={60}>每分钟</Select.Option>
+                <Select.Option value={60}>每1分钟</Select.Option>
                 <Select.Option value={300}>每5分钟</Select.Option>
-                <Select.Option value={600}>每10分钟</Select.Option>
-                <Select.Option value={3600}>每小时</Select.Option>
+                <Select.Option value={3600}>每1小时</Select.Option>
+                <Select.Option value={14400}>每4小时</Select.Option>
+                <Select.Option value={86400}>每天</Select.Option>
               </Select>
             </Form.Item>
 
-            <Form.Item label="总次数">
+            <Form.Item label="总预算上限 (USDT)">
               <InputNumber
-                value={config.totalTimes}
-                onChange={(v) => setConfig({ ...config, totalTimes: v })}
+                value={config.totalBudget}
+                onChange={(v) => setConfig({ ...config, totalBudget: v })}
                 min={1}
-                max={100}
+                max={100000}
                 style={{ width: '100%' }}
                 disabled={!isEditing || bot.isRunning}
+                placeholder="计划总投入金额"
+              />
+            </Form.Item>
+
+            <Form.Item label="价格保护 (可选)">
+              <InputNumber
+                value={config.maxPrice}
+                onChange={(v) => setConfig({ ...config, maxPrice: v })}
+                min={0}
+                step={0.01}
+                style={{ width: '100%' }}
+                disabled={!isEditing || bot.isRunning}
+                placeholder="高于此价格暂停定投"
               />
             </Form.Item>
           </Space>
@@ -136,12 +151,24 @@ export default function BotCard({ bot, onUpdate, onDelete, onToggle }) {
       case 'grid':
         return (
           <Space direction="vertical" style={{ width: '100%' }}>
+            <Form.Item label="总投入资金 (USDT)">
+              <InputNumber
+                value={config.totalInvestment}
+                onChange={(v) => setConfig({ ...config, totalInvestment: v })}
+                min={1}
+                max={100000}
+                style={{ width: '100%' }}
+                disabled={!isEditing || bot.isRunning}
+                placeholder="网格策略总资金"
+              />
+            </Form.Item>
+
             <Form.Item label="网格数量">
               <InputNumber
                 value={config.gridCount}
                 onChange={(v) => setConfig({ ...config, gridCount: v })}
                 min={2}
-                max={20}
+                max={50}
                 style={{ width: '100%' }}
                 disabled={!isEditing || bot.isRunning}
               />
@@ -169,15 +196,16 @@ export default function BotCard({ bot, onUpdate, onDelete, onToggle }) {
               />
             </Form.Item>
 
-            <Form.Item label="单网格金额 (USDT)">
-              <InputNumber
-                value={config.amountPerGrid}
-                onChange={(v) => setConfig({ ...config, amountPerGrid: v })}
-                min={1}
-                max={1000}
-                style={{ width: '100%' }}
+            <Form.Item label="网格类型">
+              <Select
+                value={config.gridType || 'arithmetic'}
+                onChange={(v) => setConfig({ ...config, gridType: v })}
                 disabled={!isEditing || bot.isRunning}
-              />
+                style={{ width: '100%' }}
+              >
+                <Select.Option value="arithmetic">等差网格</Select.Option>
+                <Select.Option value="geometric">等比网格</Select.Option>
+              </Select>
             </Form.Item>
           </Space>
         )
